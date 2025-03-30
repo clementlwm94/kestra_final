@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: team_db
+    database: dbr-demo-454806
+    schema: team_db
+    tables:
+      - name: team_table
+
+  - name: player_db
+    database: dbr-demo-454806
+    schema: player_db
+    tables:
+      - name: player_table
