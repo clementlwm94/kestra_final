@@ -1,0 +1,102 @@
+id: R_collecting_NBA_data
+namespace: prod
+
+variables:
+  year: "{{trigger.date | date('YYYY') }}"
+  file: "team_db_year_{{vars.year}}.csv"
+  file2: "player_db_year_{{vars.year}}.csv"
+  gcs_file: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.file}}"
+  gcs_file2: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.file2}}"
+  data: "{{outputs.r_script_task.outputFiles[render(vars.file)]}}"
+  data2: "{{outputs.r_script_task.outputFiles[render(vars.file2)]}}"
+
+
+
+tasks:
+  - id: r_script_task
+    type: io.kestra.plugin.scripts.r.Script
+    containerImage: iecdml41/r-hoopr-custom
+    outputFiles:
+      - "player_db_year_*.csv"
+      - "team_db_year_*.csv"
+    script: |
+      library(hoopR)
+      year_tmp  = "{{render(vars.year)}}"
+      year = as.numeric(year_tmp)
+      player <- hoopR::load_nba_player_box(seasons = year)
+      #Converting this column type as it might be different in different year
+      player$plus_minus = as.numeric(player$plus_minus)
+
+      team <- hoopR::load_nba_team_box(seasons = year)
+    
+      # Save data to CSV files
+      write.csv(player, file = paste0("player_db_year_", year, ".csv"), row.names = FALSE)
+      write.csv(team, file = paste0("team_db_year_", year, ".csv"), row.names = FALSE)
+
+      print("NBA data successfully collected and saved to CSV files")
+
+  - id: dlt_pipeline
+    type: io.kestra.plugin.scripts.python.Script
+    containerImage: iecdml41/python_dlt2
+    
+    script: |
+      import dlt
+      import kestra
+      import pandas as pd
+
+      import os
+      os.environ['DESTINATION__BIGQUERY__LOCATION'] = "US"
+      os.environ['DESTINATION__BIGQUERY__AUTODETECT_SCHEMA'] = "TRUE"
+      os.environ['DESTINATION__BIGQUERY__CREDENTIALS__PROJECT_ID'] = "{{ kv('BQ_CREDENTIALS_PROJECT_ID') }}"
+      os.environ['DESTINATION__BIGQUERY__CREDENTIALS__PRIVATE_KEY'] = "{{ kv('BQ_CREDENTIALS_PRIVATE_KEY') }}"
+      os.environ['DESTINATION__BIGQUERY__CREDENTIALS__CLIENT_EMAIL'] = "{{ kv('BQ_CREDENTIALS_CLIENT_EMAIL') }}"
+
+      def convert_integers_to_floats_in_df(df, exclude_columns=None):
+        # Create a copy to avoid modifying the original DataFrame
+        df_converted = df.copy()
+        
+        # If exclude_columns is None, initialize as empty list
+        if exclude_columns is None:
+            exclude_columns = []
+        
+        int_columns = df.select_dtypes(include=['int', 'int64', 'int32', 'int16', 'int8']).columns
+        
+        for col in int_columns:
+            if col not in exclude_columns:
+                df_converted[col] = df_converted[col].astype(float)
+        
+        return df_converted
+        
+      print("{{render(vars.data)}}")
+      dat_tmp = pd.read_csv("{{render(vars.data)}}")
+      id_columns = [col for col in dat_tmp.columns if 'id' in col.lower()]
+      dat_tmp = convert_integers_to_floats_in_df(dat_tmp,exclude_columns = id_columns)
+      pipeline = dlt.pipeline(pipeline_name='team_pipeline',
+          destination='bigquery',
+          dataset_name='team_db')
+      load_info = pipeline.run(dat_tmp,table_name="team_table",write_disposition="append")
+
+
+      dat_tmp = pd.read_csv("{{render(vars.data2)}}")
+      id_columns = [col for col in dat_tmp.columns if 'id' in col.lower()]
+      dat_tmp = convert_integers_to_floats_in_df(dat_tmp,exclude_columns = id_columns)
+      pipeline = dlt.pipeline(pipeline_name='player_pipeline',
+          destination='bigquery',
+          dataset_name='player_db')
+        
+      load_info = pipeline.run(dat_tmp,table_name="player_table" ,write_disposition="append")
+
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "59 23 1 7 *"  # Run once per year on 1st July
+
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{kv('GCP_CREDS')}}"
+      projectId: "{{kv('GCP_PROJECT_ID')}}"
+      location: "{{kv('GCP_LOCATION')}}"
+      bucket: "{{kv('GCP_BUCKET_NAME')}}"

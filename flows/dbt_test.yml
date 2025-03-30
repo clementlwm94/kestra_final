@@ -1,0 +1,71 @@
+id: dbt_test
+namespace: prod
+
+tasks:
+  - id: sync
+    type: io.kestra.plugin.git.SyncNamespaceFiles
+    #url: https://github.com/DataTalksClub/data-engineering-zoomcamp
+    gitDirectory: ''
+    branch: main
+    namespace: "{{ flow.namespace }}"
+    delete: true
+    dryRun: false
+
+  - id: dbt-build
+    type: io.kestra.plugin.dbt.cli.DbtCLI
+    env:
+      DBT_DATABASE: "{{kv('GCP_PROJECT_ID')}}"
+      DBT_SCHEMA: "dbt_kestra_table"
+    namespaceFiles:
+      enabled: true
+    containerImage: ghcr.io/kestra-io/dbt-bigquery:latest
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+    inputFiles:
+      sa.json: "{{kv('GCP_CREDS')}}"
+    commands:
+      - dbt deps
+      - dbt build
+
+    storeManifest:
+      key: manifest.json
+      namespace: "{{ flow.namespace }}"
+      
+    profiles: |
+      default:
+        outputs:
+          dev:
+            type: bigquery
+            dataset: "dbt_kestra_table"
+            project: "{{kv('GCP_PROJECT_ID')}}"
+            #location: "{{kv('GCP_LOCATION')}}"
+            keyfile: sa.json
+            method: service-account
+            priority: interactive
+            threads: 16
+            timeout_seconds: 300
+            fixed_retries: 1
+        target: dev
+
+
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{kv('GCP_CREDS')}}"
+      projectId: "{{kv('GCP_PROJECT_ID')}}"
+      #location: "{{kv('GCP_LOCATION')}}"
+      bucket: "{{kv('GCP_BUCKET_NAME')}}"
+  - type: io.kestra.plugin.git
+    values:
+      username: clementlwm94
+      url: https://github.com/clementlwm94/dbt_final
+      password: "{{ kv('GITHUB_ACCESS_TOKEN') }}"
+      branch: main
+      dryRun: false
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "59 23 2 7 *"  # Run once per year on 2nd July
+
